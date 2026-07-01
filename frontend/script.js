@@ -19,12 +19,100 @@ const newChatMenuItem = document.querySelector("#new-chat-menu-item");
 const recentChatsMenuItem = document.querySelector("#recent-chats-menu-item");
 const clearChatMenuItem = document.querySelector("#clear-chat-menu-item");
 const saveChatMenuItem = document.querySelector("#save-chat-menu-item");
+const modeToggleButton = document.querySelector("#mode-toggle");
+const chatLauncherButton = document.querySelector("#chat-launcher");
+const collapseChatButton = document.querySelector("#collapse-chat");
+const chatbotPopup = document.querySelector(".chatbot-popup");
 
 
-// --- IMPORTANT: This now points to your backend proxy server ---
-const BACKEND_API_URL = "http://localhost:3000/api/chat";
-const SAVE_CHAT_API_URL = "http://localhost:3000/api/save-chat";
-const LOAD_CHATS_API_URL = "http://localhost:3000/api/load-chats"; // Placeholder for loading recent chats
+// --- API URLs ---
+const BACKEND_PORTS = [3000, 3001, 3002, 3003, 3004, 3005];
+const BACKEND_HOST = "http://localhost";
+let resolvedBackendBaseUrl = null;
+
+const getBackendBaseUrl = async () => {
+    if (resolvedBackendBaseUrl) {
+        return resolvedBackendBaseUrl;
+    }
+
+    for (const port of BACKEND_PORTS) {
+        try {
+            const response = await fetch(`${BACKEND_HOST}:${port}/`);
+            if (response.ok) {
+                resolvedBackendBaseUrl = `${BACKEND_HOST}:${port}`;
+                return resolvedBackendBaseUrl;
+            }
+        } catch (error) {
+            // Try the next port.
+        }
+    }
+
+    throw new Error("Backend server not found. Start the backend in the backend folder first.");
+};
+
+const fetchBackend = async (path, options = {}) => {
+    const baseUrl = await getBackendBaseUrl();
+    return fetch(`${baseUrl}${path}`, options);
+};
+
+const THEME_STORAGE_KEY = "chatbot-theme";
+
+const applyTheme = (theme) => {
+    const isDark = theme === "dark";
+    document.body.classList.toggle("dark-mode", isDark);
+    if (modeToggleButton) {
+        modeToggleButton.textContent = isDark ? "dark_mode" : "light_mode";
+        modeToggleButton.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+        modeToggleButton.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
+    }
+};
+
+const getInitialTheme = () => {
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    if (savedTheme === "dark" || savedTheme === "light") {
+        return savedTheme;
+    }
+
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? "dark"
+        : "light";
+};
+
+const toggleTheme = () => {
+    const nextTheme = document.body.classList.contains("dark-mode") ? "light" : "dark";
+    applyTheme(nextTheme);
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+};
+
+const setChatOpen = (isOpen) => {
+    if (!chatbotPopup || !chatLauncherButton) {
+        return;
+    }
+
+    chatbotPopup.classList.toggle("is-collapsed", !isOpen);
+    chatLauncherButton.classList.toggle("is-hidden", isOpen);
+    chatLauncherButton.classList.toggle("is-open", isOpen);
+    chatLauncherButton.setAttribute("aria-label", isOpen ? "Close chat" : "Open chat");
+    chatLauncherButton.setAttribute("title", isOpen ? "Close chat" : "Open chat");
+
+    if (isOpen) {
+        setTimeout(() => messageInput?.focus(), 220);
+    } else {
+        emojiPicker?.classList.remove("show");
+        dropdownMenu?.classList.remove("show");
+        menuButton?.setAttribute("aria-expanded", "false");
+    }
+};
+
+const toggleChat = () => {
+    if (!chatbotPopup) {
+        return;
+    }
+
+    const isOpen = chatbotPopup.classList.contains("is-collapsed");
+    setChatOpen(isOpen);
+};
+
 
 // Object to store user data (message and file) before sending to backend
 const userData = {
@@ -47,9 +135,9 @@ const botAvatarSVG = `
     </svg>
 `;
 
-// HTML for the "thinking" animation dots
+// HTML for the "thinking" animation — typing bubble with dots beside avatar
 const thinkingDotsHTML = `
-    <div class="message-text">
+    <div class="typing-bubble">
         <div class="thinking-indicator">
             <div class="dot"></div>
             <div class="dot"></div>
@@ -66,6 +154,7 @@ const thinkingDotsHTML = `
  */
 const createMessageElement = (content, ...classes) => {
     const div = document.createElement("div");
+    // Ensure the base 'message' class is always added
     div.classList.add("message", ...classes);
     div.innerHTML = content;
     return div;
@@ -76,14 +165,20 @@ const createMessageElement = (content, ...classes) => {
  * @param {string} text - The text content of the message.
  * @param {string} role - The role of the message ('user', 'bot', 'monologue', 'system', 'error').
  * @param {string} [imageSrc] - Optional base64 image source for user messages.
+ * @param {boolean} [temporary=false] - If true, the message will fade out and be removed after a short delay.
  */
-const displayMessage = (text, role, imageSrc = null) => {
+const displayMessage = (text, role, imageSrc = null, temporary = false) => {
+    if (!chatBody) {
+        console.error("[displayMessage] Error: chatBody element not found. Cannot display message.");
+        return null; // Return null if chatBody is not found
+    }
+
     let messageContent = `<div class="message-text">${text}</div>`;
     if (imageSrc) {
         messageContent += `<img src="${imageSrc}" alt="User Upload" class="uploaded-image-preview">`;
     }
 
-    const classes = ["message"];
+    const classes = []; // Start with an empty array for classes
     let avatarHtml = '';
 
     if (role === 'user') {
@@ -102,34 +197,66 @@ const displayMessage = (text, role, imageSrc = null) => {
     }
 
     const messageDiv = createMessageElement(
-        role === 'user' || role === 'system' ? messageContent : `${avatarHtml}${messageContent}`,
+        role === 'user' || role === 'system' || role === 'error' ? messageContent : `${avatarHtml}${messageContent}`,
         ...classes
     );
+
+    if (temporary) {
+        messageDiv.classList.add('fade-out-message');
+        // Remove the element from the DOM after the animation completes
+        messageDiv.addEventListener('animationend', () => {
+            messageDiv.remove();
+        }, { once: true });
+    }
+
     chatBody.appendChild(messageDiv);
     chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 
-    // Add message to chat history (only store relevant data, not full base64 for images unless needed for re-display)
-    // System/error messages are not typically part of the "chat history" to be saved.
+    // Add message to chat history (only store relevant data)
+    // Corrected: Filter out system/error messages from history sent to the backend.
     if (role === 'user' || role === 'monologue' || role === 'bot') {
         chatHistory.push({ role: role, text: text, image: imageSrc ? imageSrc : null });
     }
-    return messageDiv; // Return the created div for potential removal later
+    return messageDiv;
 };
-
 
 /**
  * Sends the user's message and/or file to the backend and handles the bot's response.
  */
 const generateBotResponse = async () => {
-    // Prepare the payload to send to your backend
+    // Corrected: Filter chat history to only include user and bot messages for context.
+    const historyForBackend = chatHistory.filter(msg => 
+        msg.role === 'user' || msg.role === 'bot'
+    ).map(msg => ({ 
+        // Corrected: Map 'bot' role to 'model' for compatibility with some APIs like Google's
+        role: msg.role === 'bot' ? 'model' : msg.role, 
+        parts: [{ text: msg.text }]
+    }));
+
+    // Prepare the current user message to send
+    const currentMessageForBackend = { 
+        role: 'user', 
+        parts: [{ text: userData.message }] 
+    };
+
+    // If there is a file, add it as a new part to the current message
+    if (userData.file.data) {
+        currentMessageForBackend.parts.push({
+            inline_data: {
+                data: userData.file.data,
+                mime_type: userData.file.mime_type
+            }
+        });
+    }
+
+    // Corrected: Send the entire filtered chat history and the current message in the payload
     const payload = {
-        message: userData.message,
-        // Only include file data if it exists
-        file: userData.file.data ? userData.file : undefined
+        history: historyForBackend,
+        currentMessage: currentMessageForBackend
     };
 
     // If there's no message or file, log a warning and clean up
-    if (!payload.message && !payload.file) {
+    if (!userData.message && !userData.file.data) {
         console.warn("No message or file data to send to the bot.");
         if (thinkingMessageDiv) {
             thinkingMessageDiv.remove();
@@ -140,17 +267,16 @@ const generateBotResponse = async () => {
         return;
     }
 
-    // Configure the fetch request
     const requestOptions = {
         method: "POST",
         headers: {
             "Content-Type": "application/json"
         },
-        body: JSON.stringify(payload) // Convert payload to JSON string
+        body: JSON.stringify(payload)
     };
 
     try {
-        const response = await fetch(BACKEND_API_URL, requestOptions);
+        const response = await fetchBackend("/api/chat", requestOptions);
         const data = await response.json();
 
         if (!response.ok) {
@@ -159,40 +285,83 @@ const generateBotResponse = async () => {
             throw new Error(backendErrorMessage);
         }
 
-        let innerMonologueText = data.innerMonologue || "";
-        let userFacingResponseText = data.userFacingResponse || "I couldn't generate a response. Please try again.";
-
-        // --- Frontend Cleaning for Display ---
-        innerMonologueText = innerMonologueText.replace(/\*\*(.*?)\*\*/g, "$1").replace(/\n+/g, ' ').trim();
-        userFacingResponseText = userFacingResponseText.replace(/\*\*(.*?)\*\*/g, "$1").replace(/\n+/g, ' ').trim();
-
-        // --- Output Constraints (Post-Processing Truncation Limits) ---
-        const MAX_USER_FACING_LENGTH = 450; // From server-js-with-firestore
-        const MAX_MONOLOGUE_LENGTH = 300;   // From server-js-with-firestore (more concise)
-
-        // Apply truncation to inner monologue
-        if (innerMonologueText.length > MAX_MONOLOGUE_LENGTH) {
-            innerMonologueText = innerMonologueText.substring(0, innerMonologueText.lastIndexOf(' ', MAX_MONOLOGUE_LENGTH)) + '...';
-        }
-
-        // Apply truncation to user-facing response
-        if (userFacingResponseText.length > MAX_USER_FACING_LENGTH) {
-            userFacingResponseText = userFacingResponseText.substring(0, userFacingResponseText.lastIndexOf(' ', MAX_USER_FACING_LENGTH)) + '...';
-        }
-
         // Remove the thinking message div
         if (thinkingMessageDiv) {
             thinkingMessageDiv.remove();
             thinkingMessageDiv = null;
         }
 
-        // --- Display Inner Monologue (only if it has content) ---
-        if (innerMonologueText.length > 0) {
-            displayMessage(`* Inner Monologue: ${innerMonologueText}`, 'monologue');
+        // Build the grouped bot response container
+        const botContainer = document.createElement('div');
+        botContainer.classList.add('message', 'bot-message');
+        botContainer.innerHTML = botAvatarSVG;
+
+        const contentDiv = document.createElement('div');
+        contentDiv.classList.add('bot-content');
+
+        // Thoughts section
+        const thoughtsText = (data.innerMonologue || '').replace(/\*\*(.*?)\*\*/g, "$1").trim();
+        if (thoughtsText) {
+            const section = document.createElement('div');
+            section.classList.add('bot-section', 'thoughts');
+            section.innerHTML = `<div class="section-label">🧠 Thoughts:</div><div class="section-body">${thoughtsText}</div>`;
+            contentDiv.appendChild(section);
         }
 
-        // --- Display User-Facing Response ---
-        displayMessage(userFacingResponseText, 'bot');
+        // Reflection section
+        const reflectionText = (data.reflection || '').replace(/\*\*(.*?)\*\*/g, "$1").trim();
+        if (reflectionText) {
+            const section = document.createElement('div');
+            section.classList.add('bot-section', 'reflection');
+            section.innerHTML = `<div class="section-label">💡 Reflection:</div><div class="section-body">${reflectionText}</div>`;
+            contentDiv.appendChild(section);
+        }
+
+        // Suggestions section
+        const suggestionsList = data.suggestions || [];
+        if (suggestionsList.length > 0) {
+            const section = document.createElement('div');
+            section.classList.add('bot-section', 'suggestions');
+            let html = '<div class="section-label">✨ Suggestions:</div><ul class="suggestions-list">';
+            suggestionsList.forEach(s => { html += `<li>${s}</li>`; });
+            html += '</ul>';
+            section.innerHTML = html;
+            contentDiv.appendChild(section);
+        }
+
+        // Follow-up questions
+        if (data.suggestedQuestions && data.suggestedQuestions.length > 0) {
+            const followupDiv = document.createElement('div');
+            followupDiv.classList.add('followup-section');
+            let html = '<div class="followup-label">❓ Follow-up:</div><div class="suggestion-chips">';
+            data.suggestedQuestions.forEach(q => {
+                html += `<button class="suggestion-chip" data-q="${encodeURIComponent(q)}">${q}</button>`;
+            });
+            html += '</div>';
+            followupDiv.innerHTML = html;
+            followupDiv.querySelectorAll('.suggestion-chip').forEach(chip => {
+                chip.addEventListener('click', () => {
+                    messageInput.value = decodeURIComponent(chip.dataset.q);
+                    handleOutgoingMessage();
+                });
+            });
+            contentDiv.appendChild(followupDiv);
+        }
+
+        botContainer.appendChild(contentDiv);
+        chatBody.appendChild(botContainer);
+
+        // Add to chat history
+        const combinedText = [
+            thoughtsText && `🧠 ${thoughtsText}`,
+            reflectionText && `💡 ${reflectionText}`,
+            suggestionsList.length > 0 && `✨ ${suggestionsList.join(', ')}`
+        ].filter(Boolean).join('\n');
+        if (combinedText) {
+            chatHistory.push({ role: 'bot', text: combinedText });
+        }
+
+        chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 
     } catch (error) {
         console.error("API Error:", error);
@@ -260,12 +429,9 @@ const handleOutgoingMessage = (e) => {
 
     // Show "thinking" message after a short delay
     setTimeout(() => {
-        const messageContentForThinking = `${botAvatarSVG}${thinkingDotsHTML}`;
-        thinkingMessageDiv = createMessageElement(
-            messageContentForThinking,
-            "bot-message",
-            "thinking"
-        );
+        thinkingMessageDiv = document.createElement('div');
+        thinkingMessageDiv.classList.add('message', 'bot-message', 'thinking');
+        thinkingMessageDiv.innerHTML = `${botAvatarSVG}${thinkingDotsHTML}`;
         chatBody.appendChild(thinkingMessageDiv);
         chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 
@@ -318,8 +484,7 @@ const loadRecentChats = async () => {
             <p class="loading-message">Loading chats...</p>
         </div>
     `;
-    chatBody.appendChild(recentChatsOverlay);
-    chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+    document.body.appendChild(recentChatsOverlay); // Append to body, not chatBody, for full overlay
 
     const recentChatsList = recentChatsOverlay.querySelector('.recent-chats-list');
     const closeRecentChatsButton = recentChatsOverlay.querySelector('#close-recent-chats');
@@ -329,7 +494,7 @@ const loadRecentChats = async () => {
     });
 
     try {
-        const response = await fetch(LOAD_CHATS_API_URL);
+        const response = await fetchBackend("/api/load-chats");
         const data = await response.json();
 
         if (response.ok) {
@@ -344,13 +509,25 @@ const loadRecentChats = async () => {
                             <span class="chat-item-timestamp">${chat.timestamp}</span>
                             <span class="chat-item-preview">${chat.preview}</span>
                         </div>
-                        <span class="material-symbols-rounded load-chat-icon" data-chat-id="${chat.id}">download</span>
+                        <div class="chat-item-actions">
+                            <span class="material-symbols-rounded load-chat-icon" data-chat-id="${chat.id}">download</span>
+                            <span class="material-symbols-rounded delete-chat-icon" data-chat-id="${chat.id}">delete</span>
+                        </div>
                     `;
                     // Add event listener to load the specific chat
                     chatItem.querySelector('.load-chat-icon').addEventListener('click', (e) => {
-                        e.stopPropagation(); // Prevent button click from affecting parent
+                        e.stopPropagation();
                         loadSelectedChat(chat.id);
-                        recentChatsOverlay.remove(); // Close overlay after selecting
+                        recentChatsOverlay.remove();
+                    });
+                    // Add event listener to delete the specific chat
+                    chatItem.querySelector('.delete-chat-icon').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        // Show a confirmation dialog before deleting
+                        showConfirmDialog('Are you sure you want to delete this chat?', () => {
+                            deleteSelectedChat(chat.id);
+                            recentChatsOverlay.remove();
+                        });
                     });
                     recentChatsList.appendChild(chatItem);
                 });
@@ -369,51 +546,59 @@ const loadRecentChats = async () => {
 
 /**
  * Loads a specific chat history by ID and displays it in the chat body.
- * This requires a new backend endpoint to fetch a single chat by ID.
- * For now, we'll simulate loading.
+ * This function now makes a real backend call.
  * @param {string} chatId - The ID of the chat to load.
  */
 const loadSelectedChat = async (chatId) => {
-    clearChat(); // Clear current chat display
+    clearChat();
     displayMessage(`Loading chat: ${chatId}...`, 'system');
 
-    // In a real application, you would fetch the full chat history from the backend
-    // using a new endpoint like /api/chat/:chatId
-    // For now, we'll simulate fetching and display a dummy history.
     try {
-        // You would need a new backend endpoint like /api/chat/:chatId
-        // const response = await fetch(`${BACKEND_API_URL}/${chatId}`);
-        // const data = await response.json();
-        // if (response.ok && data.chat) {
-        //     chatHistory = data.chat; // Update global chatHistory
-        //     chatBody.innerHTML = ''; // Clear loading message
-        //     chatHistory.forEach(msg => {
-        //         displayMessage(msg.text, msg.role, msg.image);
-        //     });
-        //     displayMessage(`Chat "${chatId}" loaded successfully!`, 'system');
-        // } else {
-        //     displayMessage(`Error loading chat ${chatId}: ${data.error || 'Chat not found'}`, 'error');
-        // }
+        const response = await fetchBackend(`/api/load-chat/${chatId}`);
+        const data = await response.json();
 
-        // SIMULATED LOADING (REMOVE THIS BLOCK WHEN YOU IMPLEMENT BACKEND FETCH FOR SINGLE CHAT)
-        setTimeout(() => {
-            const simulatedChat = [
-                { role: 'bot', text: 'Welcome back! This is a loaded chat.' },
-                { role: 'user', text: 'Hey, I remember this conversation!' },
-                { role: 'bot', text: `You loaded chat ID: ${chatId}. What would you like to discuss next?` }
-            ];
-            chatHistory = simulatedChat; // Update global chatHistory
-            chatBody.innerHTML = ''; // Clear loading message
-            simulatedChat.forEach(msg => {
+        if (response.ok && data.chat) {
+            chatHistory = data.chat;
+            chatBody.innerHTML = '';
+            chatHistory.forEach(msg => {
                 displayMessage(msg.text, msg.role, msg.image);
             });
-            displayMessage(`Chat "${chatId}" loaded successfully! (Simulated)`, 'system');
-        }, 1000);
-        // END SIMULATED LOADING
-
+            displayMessage(`Chat "${chatId}" loaded successfully!`, 'system', null, true);
+        } else {
+            displayMessage(`Error loading chat ${chatId}: ${data.error || 'Chat not found'}`, 'error');
+            console.error(`Error loading chat ${chatId}:`, data.error);
+        }
     } catch (error) {
         displayMessage(`Network error loading chat ${chatId}: ${error.message}`, 'error');
         console.error("Network error loading specific chat:", error);
+    }
+};
+
+/**
+ * Deletes a specific chat history by ID from the backend (Firestore).
+ * @param {string} chatId - The ID of the chat to delete.
+ */
+const deleteSelectedChat = async (chatId) => {
+    displayMessage(`Deleting chat: ${chatId}...`, 'system', null, true);
+
+    try {
+        const response = await fetchBackend(`/api/delete-chat/${chatId}`, {
+            method: 'DELETE',
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            displayMessage(`Chat "${chatId}" deleted successfully!`, 'system', null, true);
+            console.log(`Chat ${chatId} deleted.`);
+            loadRecentChats();
+        } else {
+            displayMessage(`Error deleting chat ${chatId}: ${data.error || 'Unknown error'}`, 'error');
+            console.error(`Error deleting chat ${chatId}:`, data.error);
+        }
+    } catch (error) {
+        displayMessage(`Network error deleting chat ${chatId}: ${error.message}`, 'error');
+        console.error("Network error deleting chat:", error);
     }
 };
 
@@ -423,20 +608,19 @@ const loadSelectedChat = async (chatId) => {
  */
 const saveChatHistory = async () => {
     if (chatHistory.length === 0) {
-        displayMessage("No chat to save! Start a conversation first.", 'system'); // Use 'system' role for info
-        dropdownMenu.classList.remove('show'); // Hide menu
-        menuButton.setAttribute('aria-expanded', 'false'); // Ensure aria-expanded is false
+        displayMessage("No chat to save! Start a conversation first.", 'system', null, true);
+        dropdownMenu.classList.remove('show');
+        menuButton.setAttribute('aria-expanded', 'false');
         return;
     }
 
-    // Show a temporary saving message
-    const savingMessageDiv = displayMessage("Saving chat...", 'system'); // Use 'system' role
-    saveChatMenuItem.disabled = true; // Disable button during save
-    dropdownMenu.classList.remove('show'); // Hide menu
-    menuButton.setAttribute('aria-expanded', 'false'); // Ensure aria-expanded is false
+    displayMessage("Saving chat...", 'system', null, true);
+    saveChatMenuItem.disabled = true;
+    dropdownMenu.classList.remove('show');
+    menuButton.setAttribute('aria-expanded', 'false');
 
     try {
-        const response = await fetch(SAVE_CHAT_API_URL, {
+        const response = await fetchBackend("/api/save-chat", {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ history: chatHistory })
@@ -445,31 +629,51 @@ const saveChatHistory = async () => {
         const data = await response.json();
 
         if (response.ok) {
-            // Remove the "Saving..." message, then display success
-            if (savingMessageDiv && savingMessageDiv.parentNode) {
-                savingMessageDiv.parentNode.removeChild(savingMessageDiv);
-            }
-            displayMessage(`Chat saved successfully! ID: ${data.chatId}`, 'system'); // Use 'system' role
+            displayMessage(`Chat saved successfully! ID: ${data.chatId}`, 'system', null, true);
             console.log("Chat saved:", data.chatId);
         } else {
             const errorMessage = data.error || "Failed to save chat.";
-            // Remove the "Saving..." message, then display error
-            if (savingMessageDiv && savingMessageDiv.parentNode) {
-                savingMessageDiv.parentNode.removeChild(savingMessageDiv);
-            }
-            displayMessage(`Error saving chat: ${errorMessage}`, 'error'); // Use 'error' role
+            displayMessage(`Error saving chat: ${errorMessage}`, 'error', null, true);
             console.error("Error saving chat:", errorMessage);
         }
     } catch (error) {
-        // Remove the "Saving..." message, then display network error
-        if (savingMessageDiv && savingMessageDiv.parentNode) {
-            savingMessageDiv.parentNode.removeChild(savingMessageDiv);
-        }
-        displayMessage(`Network error saving chat: ${error.message}`, 'error'); // Use 'error' role
+        displayMessage(`Network error saving chat: ${error.message}`, 'error', null, true);
         console.error("Network error saving chat:", error);
     } finally {
-        saveChatMenuItem.disabled = false; // Re-enable button
+        saveChatMenuItem.disabled = false;
     }
+};
+
+/**
+ * Custom confirmation dialog (replaces alert/confirm)
+ * @param {string} message - The message to display.
+ * @param {function} onConfirm - Callback function if user confirms.
+ */
+const showConfirmDialog = (message, onConfirm) => {
+    const dialogOverlay = document.createElement('div');
+    dialogOverlay.classList.add('dialog-overlay');
+    dialogOverlay.innerHTML = `
+        <div class="dialog-box">
+            <p>${message}</p>
+            <div class="dialog-actions">
+                <button id="dialog-cancel">Cancel</button>
+                <button id="dialog-confirm">Confirm</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(dialogOverlay);
+
+    const confirmButton = dialogOverlay.querySelector('#dialog-confirm');
+    const cancelButton = dialogOverlay.querySelector('#dialog-cancel');
+
+    confirmButton.addEventListener('click', () => {
+        onConfirm();
+        dialogOverlay.remove();
+    });
+
+    cancelButton.addEventListener('click', () => {
+        dialogOverlay.remove();
+    });
 };
 
 
@@ -490,7 +694,7 @@ const insertAtCaret = (textArea, text) => {
 
 // Array of emojis for the picker
 const emojis = [
-    '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😇', '🙂', '🙃', '😉', '😌', '😍', '🥰', '😘', '😗', '😙', '😚',
+    '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😇', '🙂', '🙃', '😉', '🥰', '😘', '😗', '😙', '😚',
     '😋', '😛', '😝', '😜', '🤪', '🤨', '🧐', '🤓', '😎', '🤩', '🥳', '😏', '😒', '😞', '😔', '😟', '😕', '🙁', '☹️', '😣',
     '😖', '😫', '😩', '🥺', '😤', '😠', '😡', '🤬', '🤯', '😳', '🥵', '🥶', '😱', '😨', '😰', '😢', '😭', '😪', '🤤', '😴',
     '😷', '🤒', '🤕', '🤢', '🤮', '🤧', '🫠', '🤥', '🤫', '🤭', '🤐', '😮', '😯', '😲', '🥱', '😴', '😤', '😠', '😡', '🤬',
@@ -585,75 +789,84 @@ messageInput.addEventListener('input', autoResizeTextarea);
 // Handle file input change (when a file is selected)
 fileInput.addEventListener("change", (e) => {
     const file = fileInput.files[0];
-    console.log("File input change detected. File:", file); // Debug log
-
+    
     // ONLY proceed if a file is actually selected
     if (file) {
         const reader = new FileReader();
         reader.onload = (e) => {
             // Display the image thumbnail
             filePreviewThumbnail.src = e.target.result;
-            fileuploadWrapper.classList.add("file-uploaded"); // Add class ONLY when file is loaded
-
+            fileuploadWrapper.classList.add("file-uploaded");
+            
             // Extract base64 data (without the "data:image/png;base64," prefix)
             const base64String = e.target.result.split(",")[1];
             userData.file = {
                 data: base64String,
                 mime_type: file.type
             };
-            console.log("File loaded and preview updated."); // Debug log
         };
         reader.onerror = error => {
-            console.error("Error reading file:", error); // Debug log
-            // Reset UI on error
+            console.error("Error reading file:", error);
             userData.file = { data: null, mime_type: null };
             fileuploadWrapper.classList.remove("file-uploaded");
             filePreviewThumbnail.src = "";
+            fileInput.value = "";
+            displayMessage("Error loading image. Please try again.", 'error', null, true);
         };
-        reader.readAsDataURL(file); // Read the file as a Data URL (base64)
+        reader.readAsDataURL(file);
     } else {
-        // If user cancels file selection (e.g., opens dialog and closes without choosing)
-        console.log("No file selected or selection cancelled."); // Debug log
+        // If no file is selected (e.g., user opens dialog and cancels), clear any previous selection
         userData.file = { data: null, mime_type: null };
         fileuploadWrapper.classList.remove("file-uploaded");
         filePreviewThumbnail.src = "";
+        fileInput.value = "";
     }
-    fileInput.value = ""; // Always clear the file input element after handling (or not handling)
 });
 
 // Handle file cancel button click
 fileCancelButton.addEventListener("click", () => {
-    console.log("File cancel button clicked."); // Debug log
-    // Clear file data and UI
     userData.file = { data: null, mime_type: null };
-    fileInput.value = ""; // Crucial for allowing re-uploading the same file
-    fileuploadWrapper.classList.remove("file-uploaded");
+    fileInput.value = "";
     filePreviewThumbnail.src = "";
+    fileuploadWrapper.classList.remove("file-uploaded");
 });
 
-// Send message on button click
-sendMessageButton.addEventListener("click", (e) => handleOutgoingMessage(e));
-
-// Trigger file input click when file upload button is clicked
+// NEW: Add event listener to the file upload button to trigger the hidden file input
 fileUploadButton.addEventListener("click", () => {
-    console.log("File upload button clicked. Opening file dialog."); // Debug log
     fileInput.click();
 });
 
-// Event listener for the main menu button
-menuButton.addEventListener('click', (e) => {
-    e.stopPropagation(); // Prevent document click from immediately closing it
-    const isExpanded = dropdownMenu.classList.toggle('show');
-    menuButton.setAttribute('aria-expanded', isExpanded); // Toggle aria-expanded
+
+// Menu button toggle
+menuButton.addEventListener('click', () => {
+    const isExpanded = menuButton.getAttribute('aria-expanded') === 'true';
+    dropdownMenu.classList.toggle('show');
+    menuButton.setAttribute('aria-expanded', !isExpanded);
 });
 
-// Event listeners for menu items
+// Menu item event listeners
 newChatMenuItem.addEventListener('click', clearChat);
-clearChatMenuItem.addEventListener('click', clearChat); // Clear chat messages is the same as new chat in this context
+recentChatsMenuItem.addEventListener('click', loadRecentChats);
+clearChatMenuItem.addEventListener('click', () => {
+    showConfirmDialog('Are you sure you want to clear the current chat?', clearChat);
+});
 saveChatMenuItem.addEventListener('click', saveChatHistory);
-recentChatsMenuItem.addEventListener('click', loadRecentChats); // Attach loadRecentChats
 
-// Initial welcome message when the page loads
+if (modeToggleButton) {
+    modeToggleButton.addEventListener('click', toggleTheme);
+}
+
+if (chatLauncherButton) {
+    chatLauncherButton.addEventListener('click', toggleChat);
+}
+
+if (collapseChatButton) {
+    collapseChatButton.addEventListener('click', () => setChatOpen(false));
+}
+
+// Initial welcome message on page load
 document.addEventListener('DOMContentLoaded', () => {
+    applyTheme(getInitialTheme());
+    setChatOpen(false);
     displayMessage("Hey There👋 <br/>How can I help you today?", 'bot');
 });
